@@ -1,0 +1,4 @@
+description: 在中国常用的三种坐标系之间转换 —— WGS-84（GPS / 谷歌地球）、GCJ-02（火星坐标系，高德/腾讯）、BD-09（百度坐标系）。提供
+  4 种方法：通用 GCJ-02 偏移公式（中国大陆全境，约 ±10m 误差）、基于控制点反算
+display_name: China Coord Transform
+name: china-coord-transform

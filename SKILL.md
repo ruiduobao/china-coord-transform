@@ -1,16 +1,8 @@
 ---
+description: 在中国常用的三种坐标系之间转换 —— WGS-84（GPS / 谷歌地球）、GCJ-02（火星坐标系，高德/腾讯）、BD-09（百度坐标系）。提供
+  4 种方法：通用 GCJ-02 偏移公式（中国大陆全境，约 ±10m 误差）、基于控制点反算的局部仿射/多项式（亚米级精度）、五参数/七参数 Helmert（测绘级）、以及矢量文件（GeoJSON
+  / Shapefile）批量转换。**重要：方法 1 输出存在系统性偏移，仅可用于非测绘用途，正式测绘请用方法 2/3。**
 name: china-coord-transform
-description: 在中国常用的三种坐标系之间转换 —— WGS-84（GPS / 谷歌地球）、GCJ-02（火星坐标系，高德/腾讯）、BD-09（百度坐标系）。提供 4 种方法：通用 GCJ-02 偏移公式（中国大陆全境，约 ±10m 误差）、基于控制点反算的局部仿射/多项式（亚米级精度）、五参数/七参数 Helmert（测绘级）、以及矢量文件（GeoJSON / Shapefile）批量转换。**重要：方法 1 输出存在系统性偏移，仅可用于非测绘用途，正式测绘请用方法 2/3。**
-version: 1.1.1
-metadata:
-  openclaw:
-    emoji: "🗺️"
-    requires:
-      bins:
-        - python
-    primaryEnv: ""
-    envVars: []
-    homepage: https://github.com/ruiduobao/china-coord-transform
 ---
 
 # China Coord Transform
