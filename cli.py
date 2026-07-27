@@ -36,9 +36,32 @@ import argparse
 import csv
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from transform import convert as convert_one, SUPPORTED_SYSTEMS
+
+__version__ = "0.2.0"
+USER_AGENT = f"china-coord-transform/{__version__}"
+
+
+def write_qa_summary(qa_path, args, src_lon, src_lat, dst_lon, dst_lat, params_used):
+    """Write a JSON run-summary sidecar to qa_path (Phase 5 optimization)."""
+    qa = {
+        "skill": "china-coord-transform",
+        "command": "convert",
+        "version": __version__,
+        "user_agent": USER_AGENT,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "args": vars(args),
+        "input": {"lon": src_lon, "lat": src_lat, "src_system": args.frm},
+        "output": {"lon": dst_lon, "lat": dst_lat, "dst_system": args.to},
+        "params_used": params_used,
+    }
+    qa_p = Path(qa_path)
+    qa_p.parent.mkdir(parents=True, exist_ok=True)
+    with open(qa_p, "w", encoding="utf-8") as f:
+        json.dump(qa, f, ensure_ascii=False, indent=2, default=str)
 from affine import (
     AffineParams,
     fit_affine,
@@ -63,11 +86,56 @@ from helmert import (
 
 def cmd_convert(args: argparse.Namespace) -> int:
     lon_out, lat_out = convert_one(args.lon, args.lat, args.frm, args.to)
-    if args.json:
-        print(json.dumps({"lon": lon_out, "lat": lat_out, "src": args.frm, "dst": args.to}))
+    # Resolve output format: --format wins; fall back to legacy --json
+    fmt = getattr(args, "fmt", "text")
+    if getattr(args, "json", False):
+        fmt = "json"
+    if fmt == "json":
+        print(json.dumps({
+            "lon": lon_out,
+            "lat": lat_out,
+            "src": args.frm,
+            "dst": args.to,
+        }, ensure_ascii=False))
     else:
         print(f"{lon_out:.7f},{lat_out:.7f}")
+
+    if getattr(args, "qa", None):
+        params_used = getattr(args, "params", None)
+        write_qa_summary(args.qa, args, args.lon, args.lat, lon_out, lat_out, params_used)
     return 0
+
+
+def cmd_self_test(args: argparse.Namespace) -> int:
+    """Run a small self-test with known reference values.
+
+    These are well-known GCJ-02 ↔ WGS-84 test vectors published by Chinese
+    mapping community; if any fail the install is broken.
+    """
+    # Each test is (src, dst, src_lon, src_lat, expected_lon, expected_lat, tol)
+    tests = [
+        # WGS-84 → GCJ-02 (Tiananmen Square)
+        ("wgs84", "gcj02", 116.397428, 39.90923, 116.40349, 39.91515, 0.01),
+        # GCJ-02 → WGS-84 (Tiananmen)
+        ("gcj02", "wgs84", 116.40349, 39.91515, 116.397428, 39.90923, 0.01),
+        # WGS-84 → BD-09 (Tiananmen)
+        ("wgs84", "bd09", 116.397428, 39.90923, 116.40980, 39.92172, 0.01),
+        # BD-09 → WGS-84
+        ("bd09", "wgs84", 116.40980, 39.92172, 116.397428, 39.90923, 0.01),
+        # GCJ-02 ↔ BD-09 round trip
+        ("gcj02", "bd09", 116.40349, 39.91515, 116.40980, 39.92172, 0.01),
+    ]
+    print("china-coord-transform self-test")
+    print("=" * 60)
+    n_ok = 0
+    for frm, to, slon, slat, elon, elat, tol in tests:
+        olon, olat = convert_one(slon, slat, frm, to)
+        ok = abs(olon - elon) < tol and abs(olat - elat) < tol
+        n_ok += int(ok)
+        print(f"  {'PASS' if ok else 'FAIL'} {frm}→{to} ({slon:.5f},{slat:.5f}) "
+              f"-> got ({olon:.5f},{olat:.5f}) expected ({elon:.5f},{elat:.5f})")
+    print(f"\n{n_ok}/{len(tests)} tests passed")
+    return 0 if n_ok == len(tests) else 1
 
 
 # ===== subcommand: batch =====
@@ -120,8 +188,12 @@ def cmd_batch(args: argparse.Namespace) -> int:
     out_path = Path(args.output)
     loaded = _load_params(getattr(args, "params", None))
 
-    with in_path.open("r", encoding="utf-8-sig", newline="") as fin, \
-         out_path.open("w", encoding="utf-8", newline="") as fout:
+    # Resolve format: explicit --format wins; otherwise infer from suffix
+    fmt = getattr(args, "fmt", None)
+    if fmt is None:
+        fmt = "json" if out_path.suffix.lower() == ".json" else "csv"
+
+    with in_path.open("r", encoding="utf-8-sig", newline="") as fin:
         reader = csv.DictReader(fin)
         if "lon" not in reader.fieldnames or "lat" not in reader.fieldnames:
             print("error: input CSV must have 'lon' and 'lat' columns", file=sys.stderr)
@@ -130,9 +202,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
         out_fields = list(reader.fieldnames)
         if "src_lon" not in out_fields:
             out_fields.extend(["src_lon", "src_lat", "src_system"])
-        writer = csv.DictWriter(fout, fieldnames=out_fields)
-        writer.writeheader()
-
+        out_records = []
         n_ok = n_skip = 0
         for row in reader:
             try:
@@ -149,10 +219,39 @@ def cmd_batch(args: argparse.Namespace) -> int:
             row["src_system"] = args.frm
             row["lon"] = f"{new_lon:.7f}"
             row["lat"] = f"{new_lat:.7f}"
-            writer.writerow(row)
+            out_records.append(row)
             n_ok += 1
 
+    # Emit output
+    if fmt == "json":
+        with out_path.open("w", encoding="utf-8") as fout:
+            json.dump(out_records, fout, ensure_ascii=False, indent=2)
+    else:
+        with out_path.open("w", encoding="utf-8", newline="") as fout:
+            writer = csv.DictWriter(fout, fieldnames=out_fields)
+            writer.writeheader()
+            writer.writerows(out_records)
+
     print(f"wrote {n_ok} converted rows to {out_path} (skipped {n_skip})", file=sys.stderr)
+
+    if getattr(args, "qa", None):
+        qa = {
+            "skill": "china-coord-transform",
+            "command": "batch",
+            "version": __version__,
+            "user_agent": USER_AGENT,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "args": vars(args),
+            "rows_converted": n_ok,
+            "rows_skipped": n_skip,
+            "input": str(in_path),
+            "output": str(out_path),
+            "format": fmt,
+        }
+        qa_p = Path(args.qa)
+        qa_p.parent.mkdir(parents=True, exist_ok=True)
+        with open(qa_p, "w", encoding="utf-8") as f:
+            json.dump(qa, f, ensure_ascii=False, indent=2, default=str)
     return 0
 
 
@@ -283,15 +382,27 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--to", dest="to", required=True, choices=SUPPORTED_SYSTEMS)
     pc.add_argument("--lon", type=float, required=True)
     pc.add_argument("--lat", type=float, required=True)
-    pc.add_argument("--json", action="store_true", help="emit JSON instead of CSV")
+    pc.add_argument("--format", dest="fmt", choices=["text", "json"], default="text",
+                    help="Output format: text (CSV-style 'lon,lat') or json (default: text)")
+    pc.add_argument("--json", action="store_true",
+                    help="[deprecated] Shorthand for --format json (kept for backward compat)")
+    pc.add_argument("--qa", metavar="PATH", default=None,
+                    help="Write a JSON run-summary sidecar to PATH recording the conversion parameters")
     pc.set_defaults(func=cmd_convert)
+
+    ps = sub.add_parser("self-test", help="run a built-in self-test with known values")
+    ps.set_defaults(func=cmd_self_test)
 
     pb = sub.add_parser("batch", help="convert a CSV of points")
     pb.add_argument("--from", dest="frm", required=True, choices=SUPPORTED_SYSTEMS)
     pb.add_argument("--to", dest="to", required=True, choices=SUPPORTED_SYSTEMS)
     pb.add_argument("--input", required=True)
     pb.add_argument("--output", required=True)
+    pb.add_argument("--format", dest="fmt", choices=["csv", "json"], default=None,
+                    help="Output format: csv (default) or json. If omitted, inferred from --output suffix.")
     pb.add_argument("--params", help="affine / polynomial / helmert params JSON (from `fit`)")
+    pb.add_argument("--qa", metavar="PATH", default=None,
+                    help="Write a JSON run-summary sidecar to PATH recording the conversion parameters")
     pb.set_defaults(func=cmd_batch)
 
     pf = sub.add_parser("fit", help="fit a local transform from control points")
